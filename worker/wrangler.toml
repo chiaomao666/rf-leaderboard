@@ -1,0 +1,11 @@
+name = "rf-ranking-monitor-api"
+main = "src/index.js"
+compatibility_date = "2026-08-31"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "rf-ranking-monitor"
+database_id = "REPLACE_WITH_NEW_D1_DATABASE_ID"
+
+[vars]
+ALLOWED_ORIGIN = "https://chiaomao666.github.io"
