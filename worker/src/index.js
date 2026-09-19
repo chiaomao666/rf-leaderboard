@@ -4,8 +4,15 @@ const MAX_SNAPSHOTS_PER_MODE = 100;
 const MIN_CAPTURE_INTERVAL_MS = 60_000;
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 
+function corsHeaders(origin) {
+  return {
+    'access-control-allow-origin': origin,
+    'access-control-allow-headers': 'Content-Type, X-RF-Ranking-Secret',
+    'access-control-allow-methods': 'GET, POST, OPTIONS',
+  };
+}
 function json(data, status = 200, origin = '*') {
-  return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': origin, 'access-control-allow-headers': 'Content-Type, X-RF-Ranking-Secret', 'access-control-allow-methods': 'GET, POST, OPTIONS' } });
+  return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json; charset=utf-8', ...corsHeaders(origin) } });
 }
 function cleanEntry(raw, rank) {
   if (!raw || typeof raw !== 'object') return null;
@@ -27,7 +34,12 @@ async function prune(env, mode) {
 export default {
   async fetch(request, env) {
     const origin = env.ALLOWED_ORIGIN || '*';
-    if (request.method === 'OPTIONS') return json({ ok: true }, 204, origin);
+
+    // 204 是 HTTP spec 定義的 null-body status，Response 不能帶 body，
+    // 否則 Cloudflare Workers 會在建構 Response 時直接拋例外，
+    // preflight 因此永遠失敗 → 瀏覽器端看到的就是 "Failed to fetch"。
+    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders(origin) });
+
     const url = new URL(request.url);
     if (url.pathname === '/health') return json({ ok: true, service: 'rf-ranking-monitor' }, 200, origin);
     if (url.pathname === '/api/rankings/capture' && request.method === 'POST') {

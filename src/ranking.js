@@ -13,7 +13,7 @@ export function normalizedEntries(snapshot) {
       ? (p.organization ?? p.union ?? p.guild)?.name ?? (p.organization ?? p.union ?? p.guild)?.title ?? '未提供聯盟'
       : p.organization ?? p.union ?? p.guild ?? '未提供聯盟',
     rank: Number(p.rank ?? index + 1),
-    score: p.score ?? p.rating ?? p.points ?? null,
+    // 官方 1v1/3v3/5v5 個人排行榜不會回傳絕對分數，只有名次；不再帶 score 欄位。
   })).filter((p) => p.id || p.name);
 }
 
