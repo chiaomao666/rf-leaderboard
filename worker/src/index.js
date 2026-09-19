@@ -4,15 +4,20 @@ const MAX_SNAPSHOTS_PER_MODE = 100;
 const MIN_CAPTURE_INTERVAL_MS = 60_000;
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 
-function corsHeaders(origin) {
+// 這個 API 有兩種完全不同來源的呼叫者：
+//   1. 排行榜網站（https://chiaomao666.github.io）讀取 /api/rankings/history
+//   2. 遊戲本體（本機用 file:// 開啟，Origin 是字面上的 "null"）寫入 /api/rankings/capture
+// 寫入端本來就靠 X-RF-Ranking-Secret 驗證，不是靠 CORS 擋壞人，
+// 所以這裡直接放行任何來源，改用密鑰做真正的存取控制。
+function corsHeaders() {
   return {
-    'access-control-allow-origin': origin,
+    'access-control-allow-origin': '*',
     'access-control-allow-headers': 'Content-Type, X-RF-Ranking-Secret',
     'access-control-allow-methods': 'GET, POST, OPTIONS',
   };
 }
-function json(data, status = 200, origin = '*') {
-  return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json; charset=utf-8', ...corsHeaders(origin) } });
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json; charset=utf-8', ...corsHeaders() } });
 }
 function cleanEntry(raw, rank) {
   if (!raw || typeof raw !== 'object') return null;
@@ -33,17 +38,13 @@ async function prune(env, mode) {
 }
 export default {
   async fetch(request, env) {
-    const origin = env.ALLOWED_ORIGIN || '*';
-
-    // 204 是 HTTP spec 定義的 null-body status，Response 不能帶 body，
-    // 否則 Cloudflare Workers 會在建構 Response 時直接拋例外，
-    // preflight 因此永遠失敗 → 瀏覽器端看到的就是 "Failed to fetch"。
-    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders(origin) });
+    // 204 是 null-body status，Response 不能帶 body，否則 Worker 內部直接拋例外。
+    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders() });
 
     const url = new URL(request.url);
-    if (url.pathname === '/health') return json({ ok: true, service: 'rf-ranking-monitor' }, 200, origin);
+    if (url.pathname === '/health') return json({ ok: true, service: 'rf-ranking-monitor' }, 200);
     if (url.pathname === '/api/rankings/capture' && request.method === 'POST') {
-      if (!env.RANKING_WRITE_SECRET || request.headers.get('X-RF-Ranking-Secret') !== env.RANKING_WRITE_SECRET) return json({ ok: false, error: 'unauthorized' }, 401, origin);
+      if (!env.RANKING_WRITE_SECRET || request.headers.get('X-RF-Ranking-Secret') !== env.RANKING_WRITE_SECRET) return json({ ok: false, error: 'unauthorized' }, 401);
       try {
         const body = await readJson(request);
         const capturedAt = Number(body.capturedAt) || Date.now();
@@ -65,17 +66,17 @@ export default {
           await prune(env, mode);
           accepted.push({ mode, entryCount: entries.length });
         }
-        if (!accepted.length && !skipped.length) return json({ ok: false, error: 'modes or entries required' }, 400, origin);
-        return json({ ok: true, accepted: accepted.length > 0, capturedAt, acceptedModes: accepted, skipped }, 202, origin);
-      } catch (error) { return json({ ok: false, error: error.message || 'invalid request' }, 400, origin); }
+        if (!accepted.length && !skipped.length) return json({ ok: false, error: 'modes or entries required' }, 400);
+        return json({ ok: true, accepted: accepted.length > 0, capturedAt, acceptedModes: accepted, skipped }, 202);
+      } catch (error) { return json({ ok: false, error: error.message || 'invalid request' }, 400); }
     }
     if (url.pathname === '/api/rankings/history' && request.method === 'GET') {
       const mode = String(url.searchParams.get('mode') || '5v5');
       const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit') || 50)));
-      if (!MODES.has(mode)) return json({ ok: false, error: 'invalid mode' }, 400, origin);
+      if (!MODES.has(mode)) return json({ ok: false, error: 'invalid mode' }, 400);
       const result = await env.DB.prepare('SELECT id, mode, captured_at AS capturedAt, entry_count AS entryCount, payload FROM ranking_snapshots WHERE mode = ?1 ORDER BY captured_at DESC LIMIT ?2').bind(mode, limit).all();
-      return json({ ok: true, snapshots: (result.results || []).map((row) => ({ id: row.id, mode: row.mode, capturedAt: row.capturedAt, entryCount: row.entryCount, entries: JSON.parse(row.payload) })) }, 200, origin);
+      return json({ ok: true, snapshots: (result.results || []).map((row) => ({ id: row.id, mode: row.mode, capturedAt: row.capturedAt, entryCount: row.entryCount, entries: JSON.parse(row.payload) })) }, 200);
     }
-    return json({ ok: false, error: 'not found' }, 404, origin);
+    return json({ ok: false, error: 'not found' }, 404);
   },
 };
