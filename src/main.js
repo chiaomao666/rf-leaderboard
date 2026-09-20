@@ -40,7 +40,19 @@ function render() {
     <footer class="footer">本網站為獨立排行榜監控頁面；快照只由固定的 Worker API 提供，不會向官方伺服器發送請求。</footer>
   </main>`;
   document.querySelector('#mode').onchange = (e) => { state.mode = e.target.value; load(); };
-  document.querySelector('#query').oninput = (e) => {
+  let isComposing = false;
+  const queryEl = document.querySelector('#query');
+  queryEl.addEventListener('compositionstart', () => { isComposing = true; });
+  queryEl.addEventListener('compositionend', (e) => {
+    isComposing = false;
+    const cursor = e.target.selectionStart;
+    state.query = e.target.value;
+    render();
+    const next = document.querySelector('#query');
+    if (next) { next.focus(); next.setSelectionRange(cursor, cursor); }
+  });
+  queryEl.oninput = (e) => {
+    if (isComposing) return; // 注音/倉頡等輸入法組字中，不觸發搜尋
     const cursor = e.target.selectionStart;
     state.query = e.target.value;
     render();
