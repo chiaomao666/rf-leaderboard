@@ -3,10 +3,11 @@ const MAX_ENTRIES = 5000;
 const MAX_SNAPSHOTS_PER_MODE = 100;
 const MIN_CAPTURE_INTERVAL_MS = 60_000;
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
+const MAX_NATIONS = 64;
 
 // 這個 API 有兩種完全不同來源的呼叫者：
-//   1. 排行榜網站（https://chiaomao666.github.io）讀取 /api/rankings/history
-//   2. 遊戲本體（本機用 file:// 開啟，Origin 是字面上的 "null"）寫入 /api/rankings/capture
+//   1. 排行榜網站（https://chiaomao666.github.io）讀取 /api/rankings/history、/api/rankings/nations
+//   2. 遊戲本體（本機用 file:// 開啟，Origin 是字面上的 "null"）寫入 /api/rankings/capture、/api/rankings/nations
 // 寫入端本來就靠 X-RF-Ranking-Secret 驗證，不是靠 CORS 擋壞人，
 // 所以這裡直接放行任何來源，改用密鑰做真正的存取控制。
 function corsHeaders() {
@@ -26,7 +27,23 @@ function cleanEntry(raw, rank) {
   const organization = String(raw.organization ?? raw.union ?? raw.guild ?? '').trim().slice(0, 120);
   if (!id && !name) return null;
   const score = Number.isFinite(Number(raw.score ?? raw.rating ?? raw.points)) ? Number(raw.score ?? raw.rating ?? raw.points) : null;
-  return { id: id.slice(0, 80), name, organization, rank: Number(raw.rank) > 0 ? Number(raw.rank) : rank, score };
+  const nationId = Number.isFinite(Number(raw.nationId ?? raw.nation_id)) ? Number(raw.nationId ?? raw.nation_id) : null;
+  return { id: id.slice(0, 80), name, organization, rank: Number(raw.rank) > 0 ? Number(raw.rank) : rank, score, nationId };
+}
+function cleanNation(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const id = Number(raw.id);
+  if (!Number.isFinite(id)) return null;
+  const name = String(raw.name ?? '').trim().slice(0, 60);
+  const title = String(raw.title ?? '').trim().slice(0, 80);
+  if (!name && !title) return null;
+  return {
+    id,
+    name,
+    title,
+    flag: String(raw.flag ?? '').trim().slice(0, 200),
+    colorIcon: String(raw.colorIcon ?? raw.color_icon ?? '').trim().slice(0, 200),
+  };
 }
 async function readJson(request) {
   const length = Number(request.headers.get('content-length') || 0);
@@ -43,6 +60,7 @@ export default {
 
     const url = new URL(request.url);
     if (url.pathname === '/health') return json({ ok: true, service: 'rf-ranking-monitor' }, 200);
+
     if (url.pathname === '/api/rankings/capture' && request.method === 'POST') {
       if (!env.RANKING_WRITE_SECRET || request.headers.get('X-RF-Ranking-Secret') !== env.RANKING_WRITE_SECRET) return json({ ok: false, error: 'unauthorized' }, 401);
       try {
@@ -70,6 +88,7 @@ export default {
         return json({ ok: true, accepted: accepted.length > 0, capturedAt, acceptedModes: accepted, skipped }, 202);
       } catch (error) { return json({ ok: false, error: error.message || 'invalid request' }, 400); }
     }
+
     if (url.pathname === '/api/rankings/history' && request.method === 'GET') {
       const mode = String(url.searchParams.get('mode') || '5v5');
       const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit') || 50)));
@@ -77,6 +96,29 @@ export default {
       const result = await env.DB.prepare('SELECT id, mode, captured_at AS capturedAt, entry_count AS entryCount, payload FROM ranking_snapshots WHERE mode = ?1 ORDER BY captured_at DESC LIMIT ?2').bind(mode, limit).all();
       return json({ ok: true, snapshots: (result.results || []).map((row) => ({ id: row.id, mode: row.mode, capturedAt: row.capturedAt, entryCount: row.entryCount, entries: JSON.parse(row.payload) })) }, 200);
     }
+
+    // 陣營清單幾乎是靜態參照資料（全玩家共用），寫入時直接 upsert，不像排行榜快照要留歷史。
+    if (url.pathname === '/api/rankings/nations' && request.method === 'POST') {
+      if (!env.RANKING_WRITE_SECRET || request.headers.get('X-RF-Ranking-Secret') !== env.RANKING_WRITE_SECRET) return json({ ok: false, error: 'unauthorized' }, 401);
+      try {
+        const body = await readJson(request);
+        const nations = Array.isArray(body.nations) ? body.nations.slice(0, MAX_NATIONS).map(cleanNation).filter(Boolean) : [];
+        if (!nations.length) return json({ ok: false, error: 'nations required' }, 400);
+        const now = Date.now();
+        const statements = nations.map((n) => env.DB.prepare(
+          'INSERT INTO nations (id, name, title, flag, color_icon, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ' +
+          'ON CONFLICT(id) DO UPDATE SET name = excluded.name, title = excluded.title, flag = excluded.flag, color_icon = excluded.color_icon, updated_at = excluded.updated_at'
+        ).bind(n.id, n.name, n.title, n.flag, n.colorIcon, now));
+        await env.DB.batch(statements);
+        return json({ ok: true, upserted: nations.length }, 202);
+      } catch (error) { return json({ ok: false, error: error.message || 'invalid request' }, 400); }
+    }
+
+    if (url.pathname === '/api/rankings/nations' && request.method === 'GET') {
+      const result = await env.DB.prepare('SELECT id, name, title, flag, color_icon AS colorIcon FROM nations ORDER BY id ASC').all();
+      return json({ ok: true, nations: result.results || [] }, 200);
+    }
+
     return json({ ok: false, error: 'not found' }, 404);
   },
 };

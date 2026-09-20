@@ -13,6 +13,7 @@ export function normalizedEntries(snapshot) {
       ? (p.organization ?? p.union ?? p.guild)?.name ?? (p.organization ?? p.union ?? p.guild)?.title ?? '未提供聯盟'
       : p.organization ?? p.union ?? p.guild ?? '未提供聯盟',
     rank: Number(p.rank ?? index + 1),
+    nationId: Number.isFinite(Number(p.nationId ?? p.nation_id)) ? Number(p.nationId ?? p.nation_id) : null,
     // 官方 1v1/3v3/5v5 個人排行榜不會回傳絕對分數，只有名次；不再帶 score 欄位。
   })).filter((p) => p.id || p.name);
 }
@@ -29,4 +30,20 @@ export function deltaFor(player, previousEntries) {
   if (value > 0) return { value, label: `↑ ${value}`, cls: 'delta-up' };
   if (value < 0) return { value, label: `↓ ${Math.abs(value)}`, cls: 'delta-down' };
   return { value: 0, label: '—', cls: 'delta-same' };
+}
+
+// 陣營清單是全玩家共用的靜態參照資料（id -> 名稱/旗幟），跟排行榜快照分開拿。
+export function buildNationMap(nations) {
+  const map = new Map();
+  for (const n of Array.isArray(nations) ? nations : []) {
+    const id = Number(n?.id);
+    if (!Number.isFinite(id)) continue;
+    map.set(id, { name: n.name || n.title || `陣營 ${id}`, title: n.title || '', flag: n.flag || '', colorIcon: n.colorIcon || n.color_icon || '' });
+  }
+  return map;
+}
+
+export function nationFor(player, nationMap) {
+  if (player.nationId == null || !nationMap) return null;
+  return nationMap.get(player.nationId) || null;
 }
