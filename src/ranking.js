@@ -32,9 +32,25 @@ export function deltaFor(player, previousEntries) {
   return { value: 0, label: '—', cls: 'delta-same' };
 }
 
+// 遊戲陣營靜態清單（nation_id -> 名稱），作為 fallback 備用
+// 即使 Worker 沒有回傳陣營資料也能正確顯示
+export const STATIC_NATION_MAP = new Map([
+  [1,  { name: '紅軍',     flag: '/images/home/flag/bigflag01CM.png' }],
+  [2,  { name: '臺灣',     flag: '/images/home/flag/bigflag08TW.png' }],
+  [3,  { name: '香港',     flag: '/images/home/flag/bigflag02HK.png' }],
+  [4,  { name: '藏國',     flag: '/images/home/flag/bigflag04TB.png' }],
+  [5,  { name: '維吾爾',   flag: '/images/home/flag/bigflag06UG.png' }],
+  [6,  { name: '哈薩克',   flag: '/images/home/flag/bigflag05KZ.png' }],
+  [7,  { name: '滿洲',     flag: '/images/home/flag/bigflag07MC.png' }],
+  [8,  { name: '蒙古',     flag: '/images/home/flag/bigflag03MG.png' }],
+  [9,  { name: '自由勢力', flag: '/images/home/flag/bigflag00FREE.png' }],
+  [10, { name: '反賊聯盟', flag: '/images/home/flag/bigflag09RB01.png' }],
+]);
+
 // 陣營清單是全玩家共用的靜態參照資料（id -> 名稱/旗幟），跟排行榜快照分開拿。
 export function buildNationMap(nations) {
-  const map = new Map();
+  // 先用靜態清單初始化，再用動態資料覆蓋（有的話）
+  const map = new Map(STATIC_NATION_MAP);
   for (const n of Array.isArray(nations) ? nations : []) {
     const id = Number(n?.id);
     if (!Number.isFinite(id)) continue;
