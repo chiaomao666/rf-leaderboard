@@ -1,4 +1,4 @@
-export const MODES = ['1v1', '3v3', '5v5'];
+export const MODES = ['1v1', '3v3'];
 
 export function entriesFrom(snapshot) {
   const entries = snapshot?.entries || snapshot?.players || snapshot?.data || [];
@@ -14,7 +14,7 @@ export function normalizedEntries(snapshot) {
       : p.organization ?? p.union ?? p.guild ?? '未提供聯盟',
     rank: Number(p.rank ?? index + 1),
     nationId: Number.isFinite(Number(p.nationId ?? p.nation_id)) ? Number(p.nationId ?? p.nation_id) : null,
-    // 官方 1v1/3v3/5v5 個人排行榜不會回傳絕對分數，只有名次；不再帶 score 欄位。
+    // 排行榜快照本身只有名次；積分另外從 /api/medals 取得，在 main.js 用玩家 ID 合併。
   })).filter((p) => p.id || p.name);
 }
 

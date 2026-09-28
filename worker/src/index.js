@@ -1,4 +1,4 @@
-const MODES = new Set(['1v1', '3v3', '5v5']);
+const MODES = new Set(['1v1', '3v3']);
 const MAX_ENTRIES = 5000;
 const MAX_SNAPSHOTS_PER_MODE = 100;
 const MIN_CAPTURE_INTERVAL_MS = 60_000;
@@ -90,7 +90,7 @@ export default {
     }
 
     if (url.pathname === '/api/rankings/history' && request.method === 'GET') {
-      const mode = String(url.searchParams.get('mode') || '5v5');
+      const mode = String(url.searchParams.get('mode') || '1v1');
       const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit') || 50)));
       if (!MODES.has(mode)) return json({ ok: false, error: 'invalid mode' }, 400);
       const result = await env.DB.prepare('SELECT id, mode, captured_at AS capturedAt, entry_count AS entryCount, payload FROM ranking_snapshots WHERE mode = ?1 ORDER BY captured_at DESC LIMIT ?2').bind(mode, limit).all();
@@ -117,6 +117,57 @@ export default {
     if (url.pathname === '/api/rankings/nations' && request.method === 'GET') {
       const result = await env.DB.prepare('SELECT id, name, title, flag, color_icon AS colorIcon FROM nations ORDER BY id ASC').all();
       return json({ ok: true, nations: result.results || [] }, 200);
+    }
+
+    // ---- 積分上傳 (POST /api/medals/capture) ----
+    if (url.pathname === '/api/medals/capture' && request.method === 'POST') {
+      if (!env.RANKING_WRITE_SECRET || request.headers.get('X-RF-Ranking-Secret') !== env.RANKING_WRITE_SECRET) return json({ ok: false, error: 'unauthorized' }, 401);
+      let body;
+      try { body = await readJson(request); } catch (error) { return json({ ok: false, error: error.message || 'invalid request' }, 400); }
+      const playerId = String(body?.playerId || '').trim().slice(0, 80);
+      if (!playerId) return json({ ok: false, error: 'missing playerId' }, 400);
+      const scores = body?.scores;
+      if (!scores || typeof scores !== 'object') return json({ ok: false, error: 'missing scores' }, 400);
+      const capturedAt = Date.now();
+      const stmts = [];
+      for (const [mode, entry] of Object.entries(scores)) {
+        if (!MODES.has(mode)) continue;
+        const rank = Number(entry?.rank);
+        const score = Number(entry?.score ?? 0);
+        const medalId = entry?.medalId != null && Number.isFinite(Number(entry.medalId)) ? Number(entry.medalId) : null;
+        if (!Number.isFinite(rank)) continue;
+        stmts.push(env.DB.prepare(
+          'INSERT INTO player_medals (player_id, mode, rank, score, medal_id, captured_at) VALUES (?, ?, ?, ?, ?, ?) ' +
+          'ON CONFLICT(player_id, mode) DO UPDATE SET rank=excluded.rank, score=excluded.score, medal_id=excluded.medal_id, captured_at=excluded.captured_at'
+        ).bind(playerId, mode, rank, Number.isFinite(score) ? score : 0, medalId, capturedAt));
+      }
+      if (!stmts.length) return json({ ok: false, error: 'no valid modes' }, 400);
+      try { await env.DB.batch(stmts); } catch (error) { return json({ ok: false, error: error.message || 'db error' }, 500); }
+      return json({ ok: true, updated: stmts.length }, 202);
+    }
+
+    // ---- 積分查詢 (GET /api/medals) ----
+    // 公開端點，依積分排序；只回傳 playerId 與積分，玩家名稱由前端用 ID 對應排行榜快照。
+    if (url.pathname === '/api/medals' && request.method === 'GET') {
+      const mode = url.searchParams.get('mode') || '1v1';
+      if (!MODES.has(mode)) return json({ ok: false, error: 'invalid mode' }, 400);
+      const limit = Math.min(900, Math.max(1, Number(url.searchParams.get('limit') || 100) || 100));
+      const offset = Math.max(0, Number(url.searchParams.get('offset') || 0) || 0);
+      const q = String(url.searchParams.get('q') || '').trim().slice(0, 100);
+      let query = 'SELECT pm.player_id, pm.mode, pm.rank AS medals_rank, pm.score, pm.medal_id, pm.captured_at FROM player_medals pm WHERE pm.mode = ?';
+      const params = [mode];
+      if (q) {
+        const escaped = q.replace(/[\\%_]/g, (c) => '\\' + c);
+        query += " AND pm.player_id LIKE ? ESCAPE '\\'";
+        params.push(`%${escaped}%`);
+      }
+      query += ' ORDER BY pm.score DESC, pm.rank ASC LIMIT ? OFFSET ?';
+      params.push(limit, offset);
+      try {
+        const rows = await env.DB.prepare(query).bind(...params).all();
+        const total = await env.DB.prepare('SELECT COUNT(*) AS n FROM player_medals WHERE mode = ?').bind(mode).first();
+        return json({ ok: true, mode, total: Number(total?.n || 0), limit, offset, entries: (rows.results || []).map((r) => ({ playerId: r.player_id, rank: Number(r.medals_rank), score: Number(r.score), medalId: r.medal_id, capturedAt: Number(r.captured_at) })) }, 200);
+      } catch (error) { return json({ ok: false, error: error.message || 'db error' }, 500); }
     }
 
     return json({ ok: false, error: 'not found' }, 404);
