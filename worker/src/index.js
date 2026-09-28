@@ -199,6 +199,33 @@ async function pullFromGame(env) {
   });
 }
 
+// 記錄最近一次抓取的結果，讓網站能顯示「自動抓取是否正常」。
+// 資料表用 CREATE TABLE IF NOT EXISTS 自動建立，不需要另外跑 migration。
+async function recordPull(env, ok, error) {
+  const now = Date.now();
+  try {
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS pull_status (id INTEGER PRIMARY KEY CHECK (id = 1), ok INTEGER NOT NULL, attempted_at INTEGER NOT NULL, success_at INTEGER, error TEXT)').run();
+    await env.DB.prepare(
+      'INSERT INTO pull_status (id, ok, attempted_at, success_at, error) VALUES (1, ?1, ?2, ?3, ?4) ' +
+      'ON CONFLICT(id) DO UPDATE SET ok = excluded.ok, attempted_at = excluded.attempted_at, error = excluded.error, ' +
+      'success_at = CASE WHEN excluded.ok = 1 THEN excluded.attempted_at ELSE pull_status.success_at END'
+    ).bind(ok ? 1 : 0, now, ok ? now : null, ok ? null : String(error || 'unknown error').slice(0, 200)).run();
+  } catch (e) { console.error('[pull] failed to record status', e?.message || e); }
+}
+
+// 抓取 + 記錄結果（排程與手動觸發共用）。
+async function runPullAndRecord(env) {
+  try {
+    const summary = await runPull(env);
+    if (summary.snapshotsError) await recordPull(env, false, summary.snapshotsError);
+    else await recordPull(env, true);
+    return summary;
+  } catch (error) {
+    await recordPull(env, false, error?.message || error);
+    throw error;
+  }
+}
+
 async function runPull(env) {
   const { playerId, rankings, medals } = await pullFromGame(env);
   const capturedAt = Date.now();
@@ -215,7 +242,7 @@ async function runPull(env) {
 export default {
   // Cron Trigger（wrangler.toml 的 [triggers]）：每小時自動抓一次，不需要開遊戲或網站。
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runPull(env).then(
+    ctx.waitUntil(runPullAndRecord(env).then(
       (summary) => console.log('[pull] ok', JSON.stringify(summary)),
       (error) => console.error('[pull] failed', error?.message || error),
     ));
@@ -228,10 +255,18 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === '/health') return json({ ok: true, service: 'rf-ranking-monitor' }, 200);
 
+    // 最近一次自動抓取的結果（公開；只有時間與簡短錯誤原因）
+    if (url.pathname === '/api/status' && request.method === 'GET') {
+      try {
+        const row = await env.DB.prepare('SELECT ok, attempted_at, success_at, error FROM pull_status WHERE id = 1').first();
+        return json({ ok: true, lastPull: row ? { ok: Number(row.ok) === 1, attemptedAt: Number(row.attempted_at), successAt: row.success_at == null ? null : Number(row.success_at), error: row.error || '' } : null }, 200);
+      } catch (_) { return json({ ok: true, lastPull: null }, 200); } // 資料表還沒建立（尚未抓取過）
+    }
+
     // 手動觸發一次抓取（測試用，需寫入密鑰）
     if (url.pathname === '/api/rankings/pull' && request.method === 'POST') {
       if (!env.RANKING_WRITE_SECRET || request.headers.get('X-RF-Ranking-Secret') !== env.RANKING_WRITE_SECRET) return json({ ok: false, error: 'unauthorized' }, 401);
-      try { return json(await runPull(env), 200); }
+      try { return json(await runPullAndRecord(env), 200); }
       catch (error) { return json({ ok: false, error: error.message || 'pull failed' }, 502); }
     }
 

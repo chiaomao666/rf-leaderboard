@@ -23,14 +23,36 @@ export function latestPair(snapshots) {
   return [sorted[0], sorted[1]];
 }
 
-export function deltaFor(player, previousEntries) {
-  const before = (previousEntries || []).find((p) => p.id && p.id === player.id);
-  if (!before) return { value: null, label: '首次出現', cls: 'delta-same' };
-  const value = before.rank - player.rank;
+// 名次升降：previousRank / currentRank 任一邊沒有（例如上一份快照沒這個人）就視為首次出現。
+export function rankDelta(previousRank, currentRank) {
+  if (previousRank == null || currentRank == null) return { value: null, label: '首次出現', cls: 'delta-same' };
+  const value = previousRank - currentRank;
   if (value > 0) return { value, label: `↑ ${value}`, cls: 'delta-up' };
   if (value < 0) return { value, label: `↓ ${Math.abs(value)}`, cls: 'delta-down' };
   return { value: 0, label: '—', cls: 'delta-same' };
 }
+
+export function deltaFor(player, previousEntries) {
+  const before = (previousEntries || []).find((p) => p.id && p.id === player.id);
+  return rankDelta(before ? before.rank : null, player.rank);
+}
+
+// 玩家在自己陣營內的名次：依全服名次由小到大，在同一陣營內依序數 1、2、3…
+// 回傳 Map<玩家 ID, 陣營名次>。沒有陣營或沒有 ID 的玩家不會出現在結果裡。
+export function nationRanks(entries) {
+  const counters = new Map();
+  const ranks = new Map();
+  for (const p of [...(entries || [])].sort((a, b) => a.rank - b.rank)) {
+    if (p.nationId == null || !p.id) continue;
+    const next = (counters.get(p.nationId) || 0) + 1;
+    counters.set(p.nationId, next);
+    ranks.set(p.id, next);
+  }
+  return ranks;
+}
+
+// 不出現在「陣營篩選」下拉選單的陣營 ID：自由勢力（9）沒有玩家隸屬，不需要列出。
+export const HIDDEN_FILTER_NATION_IDS = new Set([9]);
 
 // 遊戲陣營靜態清單（nation_id -> 名稱），作為 fallback 備用
 // 即使 Worker 沒有回傳陣營資料也能正確顯示
