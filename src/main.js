@@ -33,9 +33,10 @@ function pullStatusHtml() {
   const s = state.pull;
   if (!s) return '';
   const okAt = s.successAt ? new Date(s.successAt).toLocaleString() : '';
-  if (!s.ok) return `<div class="pull-status bad">自動抓取失敗：${esc(s.error || '未知錯誤')}${okAt ? `（上次成功 ${esc(okAt)}）` : ''}</div>`;
+  const accountNote = s.account ? `［${esc(s.account)}］` : '';
+  if (!s.ok) return `<div class="pull-status bad">自動抓取失敗${accountNote}：${esc(s.error || '未知錯誤')}${okAt ? `（上次成功 ${esc(okAt)}）` : ''}</div>`;
   if (Date.now() - s.attemptedAt > STALE_PULL_MS) return `<div class="pull-status warn">自動抓取已超過 3 小時沒有執行（上次 ${esc(new Date(s.attemptedAt).toLocaleString())}）</div>`;
-  return `<div class="pull-status ok">自動抓取正常 · 上次成功 ${esc(okAt)}</div>`;
+  return `<div class="pull-status ok">自動抓取正常${accountNote} · 上次成功 ${esc(okAt)}</div>`;
 }
 
 function render() {

@@ -146,10 +146,45 @@ function medalsFrom(response) {
   return Object.keys(scores).length ? scores : null;
 }
 
-async function pullFromGame(env) {
+// 多帳號設定：GAME_ACCOUNTS 是一段 JSON 陣列字串，例如
+//   [{"token":"...","playerId":"832459","label":"帳號A"},{"token":"...","playerId":"111111","label":"帳號B"}]
+// 用 `npx wrangler secret put GAME_ACCOUNTS` 貼上整段 JSON（一行）。
+// 沒有設定 GAME_ACCOUNTS 的話，fallback 用單一的 GAME_TOKEN / GAME_PLAYER_ID（跟原本一樣）。
+function parseAccounts(env) {
+  if (env.GAME_ACCOUNTS) {
+    try {
+      const list = JSON.parse(env.GAME_ACCOUNTS);
+      if (Array.isArray(list)) {
+        const accounts = list.map((a, i) => ({
+          token: String(a?.token || '').trim(),
+          playerId: String(a?.playerId ?? a?.player_id ?? '').trim(),
+          label: String(a?.label || a?.playerId || `帳號${i + 1}`).slice(0, 40),
+        })).filter((a) => a.token && a.playerId);
+        if (accounts.length) return accounts;
+      }
+    } catch (error) { console.error('[accounts] GAME_ACCOUNTS 格式錯誤（需要 JSON 陣列）：', error.message); }
+  }
   const token = String(env.GAME_TOKEN || '').trim();
   const playerId = String(env.GAME_PLAYER_ID || '').trim();
-  if (!token || !playerId) throw new Error('GAME_TOKEN / GAME_PLAYER_ID not configured');
+  return token && playerId ? [{ token, playerId, label: playerId }] : [];
+}
+
+// 多帳號時輪流用一個帳號抓取（每次排程只用一個），降低單一帳號被呼叫的頻率、分散風險。
+// 用 D1 記住下一次該輪到第幾個帳號，重新部署或 Worker 重啟都不會跳號或重置。
+async function pickAccount(env) {
+  const accounts = parseAccounts(env);
+  if (!accounts.length) throw new Error('尚未設定帳號（GAME_TOKEN/GAME_PLAYER_ID 或 GAME_ACCOUNTS）');
+  if (accounts.length === 1) return { ...accounts[0], index: 0, total: 1 };
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS rotation_state (id INTEGER PRIMARY KEY CHECK (id = 1), idx INTEGER NOT NULL)').run();
+  const row = await env.DB.prepare('SELECT idx FROM rotation_state WHERE id = 1').first();
+  const idx = row ? Number(row.idx) % accounts.length : 0;
+  const next = (idx + 1) % accounts.length;
+  await env.DB.prepare('INSERT INTO rotation_state (id, idx) VALUES (1, ?1) ON CONFLICT(id) DO UPDATE SET idx = excluded.idx').bind(next).run();
+  return { ...accounts[idx], index: idx, total: accounts.length };
+}
+
+async function pullFromGame(env, token, playerId) {
+  if (!token || !playerId) throw new Error('缺少帳號 token 或 player id');
   const topic = `player:${playerId}`;
   // Workers 對外連 WebSocket：用 https:// 加 Upgrade header，再取 response.webSocket。
   // token 不做 encodeURIComponent，跟主控台實測成功的網址完全一致。
@@ -201,15 +236,17 @@ async function pullFromGame(env) {
 
 // 記錄最近一次抓取的結果，讓網站能顯示「自動抓取是否正常」。
 // 資料表用 CREATE TABLE IF NOT EXISTS 自動建立，不需要另外跑 migration。
-async function recordPull(env, ok, error) {
+async function recordPull(env, ok, error, account) {
   const now = Date.now();
   try {
-    await env.DB.prepare('CREATE TABLE IF NOT EXISTS pull_status (id INTEGER PRIMARY KEY CHECK (id = 1), ok INTEGER NOT NULL, attempted_at INTEGER NOT NULL, success_at INTEGER, error TEXT)').run();
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS pull_status (id INTEGER PRIMARY KEY CHECK (id = 1), ok INTEGER NOT NULL, attempted_at INTEGER NOT NULL, success_at INTEGER, error TEXT, account TEXT)').run();
+    // 給部署在「新增 account 欄位」之前就建立過 pull_status 的舊資料庫補欄位；欄位已存在時會出錯，忽略即可。
+    try { await env.DB.prepare('ALTER TABLE pull_status ADD COLUMN account TEXT').run(); } catch (_) { /* 欄位已存在 */ }
     await env.DB.prepare(
-      'INSERT INTO pull_status (id, ok, attempted_at, success_at, error) VALUES (1, ?1, ?2, ?3, ?4) ' +
-      'ON CONFLICT(id) DO UPDATE SET ok = excluded.ok, attempted_at = excluded.attempted_at, error = excluded.error, ' +
+      'INSERT INTO pull_status (id, ok, attempted_at, success_at, error, account) VALUES (1, ?1, ?2, ?3, ?4, ?5) ' +
+      'ON CONFLICT(id) DO UPDATE SET ok = excluded.ok, attempted_at = excluded.attempted_at, error = excluded.error, account = excluded.account, ' +
       'success_at = CASE WHEN excluded.ok = 1 THEN excluded.attempted_at ELSE pull_status.success_at END'
-    ).bind(ok ? 1 : 0, now, ok ? now : null, ok ? null : String(error || 'unknown error').slice(0, 200)).run();
+    ).bind(ok ? 1 : 0, now, ok ? now : null, ok ? null : String(error || 'unknown error').slice(0, 200), account || null).run();
   } catch (e) { console.error('[pull] failed to record status', e?.message || e); }
 }
 
@@ -217,19 +254,27 @@ async function recordPull(env, ok, error) {
 async function runPullAndRecord(env) {
   try {
     const summary = await runPull(env);
-    if (summary.snapshotsError) await recordPull(env, false, summary.snapshotsError);
-    else await recordPull(env, true);
+    if (summary.snapshotsError) await recordPull(env, false, summary.snapshotsError, summary.account);
+    else await recordPull(env, true, null, summary.account);
     return summary;
   } catch (error) {
-    await recordPull(env, false, error?.message || error);
+    await recordPull(env, false, error?.message || error, error?.account || null);
     throw error;
   }
 }
 
 async function runPull(env) {
-  const { playerId, rankings, medals } = await pullFromGame(env);
+  const account = await pickAccount(env);
+  let pulled;
+  try {
+    pulled = await pullFromGame(env, account.token, account.playerId);
+  } catch (error) {
+    error.account = account.label; // 讓失敗記錄也知道是哪個帳號抓的
+    throw error;
+  }
+  const { playerId, rankings, medals } = pulled;
   const capturedAt = Date.now();
-  const summary = { ok: true, capturedAt, snapshots: null, medalsUpdated: 0 };
+  const summary = { ok: true, capturedAt, account: account.label, accountIndex: account.index, accountTotal: account.total, snapshots: null, medalsUpdated: 0 };
   const modes = rankingsFrom(rankings);
   if (modes) summary.snapshots = await storeSnapshots(env, capturedAt, Object.entries(modes));
   else summary.snapshotsError = 'no 1v1/3v3 ranking data in reply';
@@ -258,8 +303,8 @@ export default {
     // 最近一次自動抓取的結果（公開；只有時間與簡短錯誤原因）
     if (url.pathname === '/api/status' && request.method === 'GET') {
       try {
-        const row = await env.DB.prepare('SELECT ok, attempted_at, success_at, error FROM pull_status WHERE id = 1').first();
-        return json({ ok: true, lastPull: row ? { ok: Number(row.ok) === 1, attemptedAt: Number(row.attempted_at), successAt: row.success_at == null ? null : Number(row.success_at), error: row.error || '' } : null }, 200);
+        const row = await env.DB.prepare('SELECT ok, attempted_at, success_at, error, account FROM pull_status WHERE id = 1').first();
+        return json({ ok: true, lastPull: row ? { ok: Number(row.ok) === 1, attemptedAt: Number(row.attempted_at), successAt: row.success_at == null ? null : Number(row.success_at), error: row.error || '', account: row.account || null } : null }, 200);
       } catch (_) { return json({ ok: true, lastPull: null }, 200); } // 資料表還沒建立（尚未抓取過）
     }
 
