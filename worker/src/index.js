@@ -6,6 +6,7 @@ const MIN_CAPTURE_INTERVAL_MS = 60_000;
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_NATIONS = 64;
 const GAME_WS_TIMEOUT_MS = 30_000;
+const MAX_GAME_TOKEN_LENGTH = 4096;
 
 // 這個 API 有兩種完全不同來源的呼叫者：
 //   1. 排行榜網站（https://chiaomao666.github.io）讀取 /api/rankings/history、/api/rankings/nations
@@ -96,6 +97,24 @@ async function storeMedals(env, playerId, scores, capturedAt) {
   return stmts.length;
 }
 
+// 遊戲端登入後回報的短期 token。此值不經由任何 GET API 回傳，也不寫入
+// 前端；它只讓排程在目前 token 有效期間能主動取得排行榜。
+async function storeReportedGameToken(env, token) {
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS game_session_token (id INTEGER PRIMARY KEY CHECK (id = 1), token TEXT NOT NULL, updated_at INTEGER NOT NULL)').run();
+  await env.DB.prepare('INSERT INTO game_session_token (id, token, updated_at) VALUES (1, ?1, ?2) ON CONFLICT(id) DO UPDATE SET token = excluded.token, updated_at = excluded.updated_at').bind(token, Date.now()).run();
+}
+
+async function readReportedGameToken(env) {
+  try {
+    const row = await env.DB.prepare('SELECT token FROM game_session_token WHERE id = 1').first();
+    const token = String(row?.token || '').trim();
+    return token || null;
+  } catch (_) {
+    // 尚未有遊戲端回報或舊 D1 尚未建立資料表時，沿用既有 Worker secret。
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------
 //  直接連遊戲 WebSocket 抓資料（取代原本要開遊戲才會動的 mod）
 //  Token 只能查詢該 token 所屬的玩家頻道；排行榜是全服共用，所以一個帳號就夠。
@@ -174,7 +193,10 @@ function parseAccounts(env) {
 async function pickAccount(env) {
   const accounts = parseAccounts(env);
   if (!accounts.length) throw new Error('尚未設定帳號（GAME_TOKEN/GAME_PLAYER_ID 或 GAME_ACCOUNTS）');
-  if (accounts.length === 1) return { ...accounts[0], index: 0, total: 1 };
+  // 本機 mod 每次建立官方 WebSocket 時，都會回報最新 token。它優先於部署時
+  // 寫死的 GAME_TOKEN，因此 token 自動更新後不必重新部署 Worker。
+  const reportedToken = await readReportedGameToken(env);
+  if (accounts.length === 1) return { ...accounts[0], token: reportedToken || accounts[0].token, label: reportedToken ? `${accounts[0].label}（自動更新）` : accounts[0].label, index: 0, total: 1 };
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS rotation_state (id INTEGER PRIMARY KEY CHECK (id = 1), idx INTEGER NOT NULL)').run();
   const row = await env.DB.prepare('SELECT idx FROM rotation_state WHERE id = 1').first();
   const idx = row ? Number(row.idx) % accounts.length : 0;
@@ -304,8 +326,13 @@ export default {
     if (url.pathname === '/api/status' && request.method === 'GET') {
       try {
         const row = await env.DB.prepare('SELECT ok, attempted_at, success_at, error, account FROM pull_status WHERE id = 1').first();
-        return json({ ok: true, lastPull: row ? { ok: Number(row.ok) === 1, attemptedAt: Number(row.attempted_at), successAt: row.success_at == null ? null : Number(row.success_at), error: row.error || '', account: row.account || null } : null }, 200);
-      } catch (_) { return json({ ok: true, lastPull: null }, 200); } // 資料表還沒建立（尚未抓取過）
+        let sessionTokenUpdatedAt = null;
+        try {
+          const session = await env.DB.prepare('SELECT updated_at FROM game_session_token WHERE id = 1').first();
+          if (session?.updated_at != null) sessionTokenUpdatedAt = Number(session.updated_at);
+        } catch (_) { /* 尚未由新版遊戲端回報過 token */ }
+        return json({ ok: true, lastPull: row ? { ok: Number(row.ok) === 1, attemptedAt: Number(row.attempted_at), successAt: row.success_at == null ? null : Number(row.success_at), error: row.error || '', account: row.account || null } : null, sessionTokenUpdatedAt }, 200);
+      } catch (_) { return json({ ok: true, lastPull: null, sessionTokenUpdatedAt: null }, 200); } // 資料表還沒建立（尚未抓取過）
     }
 
     // 手動觸發一次抓取（測試用，需寫入密鑰）
@@ -313,6 +340,19 @@ export default {
       if (!env.RANKING_WRITE_SECRET || request.headers.get('X-RF-Ranking-Secret') !== env.RANKING_WRITE_SECRET) return json({ ok: false, error: 'unauthorized' }, 401);
       try { return json(await runPullAndRecord(env), 200); }
       catch (error) { return json({ ok: false, error: error.message || 'pull failed' }, 502); }
+    }
+
+    // 遊戲本機 mod 在官方 WebSocket 建立時回報當次短期 token。和既有的
+    // /capture 共用寫入密鑰，token 永遠不會在公開讀取 API 或網站顯示。
+    if (url.pathname === '/api/rankings/session-token' && request.method === 'POST') {
+      if (!env.RANKING_WRITE_SECRET || request.headers.get('X-RF-Ranking-Secret') !== env.RANKING_WRITE_SECRET) return json({ ok: false, error: 'unauthorized' }, 401);
+      try {
+        const body = await readJson(request);
+        const token = typeof body?.token === 'string' ? body.token.trim() : '';
+        if (token.length < 16 || token.length > MAX_GAME_TOKEN_LENGTH) return json({ ok: false, error: 'invalid token' }, 400);
+        await storeReportedGameToken(env, token);
+        return json({ ok: true, updatedAt: Date.now() }, 202);
+      } catch (error) { return json({ ok: false, error: error.message || 'invalid request' }, 400); }
     }
 
     if (url.pathname === '/api/rankings/capture' && request.method === 'POST') {

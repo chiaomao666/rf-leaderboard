@@ -5,7 +5,7 @@ import { MODES, normalizedEntries, latestPair, deltaFor, rankDelta, nationRanks,
 // 若之後要換 Worker 網域，改這個常數即可。
 const DEFAULT_API_ORIGIN = 'https://rf-ranking-monitor-api.chengyen1209.workers.dev';
 
-const state = { mode: '1v1', query: '', nation: '', sort: 'rank', snapshots: [], nations: [], medals: new Map(), pull: null, loading: false, error: '' };
+const state = { mode: '1v1', query: '', nation: '', sort: 'rank', snapshots: [], nations: [], medals: new Map(), pull: null, sessionTokenUpdatedAt: null, loading: false, error: '' };
 const app = document.querySelector('#app');
 
 function apiOrigin() {
@@ -31,12 +31,15 @@ function formatGap(ms) {
 const STALE_PULL_MS = 3 * 60 * 60 * 1000;
 function pullStatusHtml() {
   const s = state.pull;
-  if (!s) return '';
+  const tokenNote = state.sessionTokenUpdatedAt
+    ? ` · 遊戲憑證已更新 ${esc(new Date(state.sessionTokenUpdatedAt).toLocaleString())}`
+    : ' · 尚未收到遊戲憑證更新';
+  if (!s) return `<div class="pull-status warn">${tokenNote.trim()}</div>`;
   const okAt = s.successAt ? new Date(s.successAt).toLocaleString() : '';
   const accountNote = s.account ? `［${esc(s.account)}］` : '';
-  if (!s.ok) return `<div class="pull-status bad">自動抓取失敗${accountNote}：${esc(s.error || '未知錯誤')}${okAt ? `（上次成功 ${esc(okAt)}）` : ''}</div>`;
-  if (Date.now() - s.attemptedAt > STALE_PULL_MS) return `<div class="pull-status warn">自動抓取已超過 3 小時沒有執行（上次 ${esc(new Date(s.attemptedAt).toLocaleString())}）</div>`;
-  return `<div class="pull-status ok">自動抓取正常${accountNote} · 上次成功 ${esc(okAt)}</div>`;
+  if (!s.ok) return `<div class="pull-status bad">自動抓取失敗${accountNote}：${esc(s.error || '未知錯誤')}${okAt ? `（上次成功 ${esc(okAt)}）` : ''}${tokenNote}</div>`;
+  if (Date.now() - s.attemptedAt > STALE_PULL_MS) return `<div class="pull-status warn">自動抓取已超過 3 小時沒有執行（上次 ${esc(new Date(s.attemptedAt).toLocaleString())}）${tokenNote}</div>`;
+  return `<div class="pull-status ok">自動抓取正常${accountNote} · 上次成功 ${esc(okAt)}${tokenNote}</div>`;
 }
 
 function render() {
@@ -149,6 +152,7 @@ async function loadStatus() {
     const body = await response.json();
     if (response.ok && body.ok === true) {
       state.pull = body.lastPull || null;
+      state.sessionTokenUpdatedAt = Number.isFinite(Number(body.sessionTokenUpdatedAt)) ? Number(body.sessionTokenUpdatedAt) : null;
       render();
     }
   } catch (error) { console.warn('無法載入抓取狀態：', error); }
