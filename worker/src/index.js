@@ -97,16 +97,16 @@ async function storeMedals(env, playerId, scores, capturedAt) {
   return stmts.length;
 }
 
-// 遊戲端登入後回報的短期 token。此值不經由任何 GET API 回傳，也不寫入
-// 前端；它只讓排程在目前 token 有效期間能主動取得排行榜。
-async function storeReportedGameToken(env, token) {
-  await env.DB.prepare('CREATE TABLE IF NOT EXISTS game_session_token (id INTEGER PRIMARY KEY CHECK (id = 1), token TEXT NOT NULL, updated_at INTEGER NOT NULL)').run();
-  await env.DB.prepare('INSERT INTO game_session_token (id, token, updated_at) VALUES (1, ?1, ?2) ON CONFLICT(id) DO UPDATE SET token = excluded.token, updated_at = excluded.updated_at').bind(token, Date.now()).run();
+// 遊戲端登入後回報的短期 token。每個遊戲帳號各自保存一筆，讓排程可以
+// 繼續輪替帳號；token 不經由任何 GET API 回傳，也不寫入前端。
+async function storeReportedGameToken(env, playerId, token) {
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS game_session_tokens (player_id TEXT PRIMARY KEY, token TEXT NOT NULL, updated_at INTEGER NOT NULL)').run();
+  await env.DB.prepare('INSERT INTO game_session_tokens (player_id, token, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(player_id) DO UPDATE SET token = excluded.token, updated_at = excluded.updated_at').bind(playerId, token, Date.now()).run();
 }
 
-async function readReportedGameToken(env) {
+async function readReportedGameToken(env, playerId) {
   try {
-    const row = await env.DB.prepare('SELECT token FROM game_session_token WHERE id = 1').first();
+    const row = await env.DB.prepare('SELECT token FROM game_session_tokens WHERE player_id = ?1').bind(playerId).first();
     const token = String(row?.token || '').trim();
     return token || null;
   } catch (_) {
@@ -193,16 +193,21 @@ function parseAccounts(env) {
 async function pickAccount(env) {
   const accounts = parseAccounts(env);
   if (!accounts.length) throw new Error('尚未設定帳號（GAME_TOKEN/GAME_PLAYER_ID 或 GAME_ACCOUNTS）');
-  // 本機 mod 每次建立官方 WebSocket 時，都會回報最新 token。它優先於部署時
-  // 寫死的 GAME_TOKEN，因此 token 自動更新後不必重新部署 Worker。
-  const reportedToken = await readReportedGameToken(env);
-  if (accounts.length === 1) return { ...accounts[0], token: reportedToken || accounts[0].token, label: reportedToken ? `${accounts[0].label}（自動更新）` : accounts[0].label, index: 0, total: 1 };
+  // 本機 mod 會為「各自的 playerId」回報最新 token。排程仍照原定順序
+  // 輪替帳號，只在輪到該帳號時覆蓋它自己的舊 token。
+  if (accounts.length === 1) {
+    const account = accounts[0];
+    const reportedToken = await readReportedGameToken(env, account.playerId);
+    return { ...account, token: reportedToken || account.token, label: reportedToken ? `${account.label}（自動更新）` : account.label, index: 0, total: 1 };
+  }
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS rotation_state (id INTEGER PRIMARY KEY CHECK (id = 1), idx INTEGER NOT NULL)').run();
   const row = await env.DB.prepare('SELECT idx FROM rotation_state WHERE id = 1').first();
   const idx = row ? Number(row.idx) % accounts.length : 0;
   const next = (idx + 1) % accounts.length;
   await env.DB.prepare('INSERT INTO rotation_state (id, idx) VALUES (1, ?1) ON CONFLICT(id) DO UPDATE SET idx = excluded.idx').bind(next).run();
-  return { ...accounts[idx], index: idx, total: accounts.length };
+  const account = accounts[idx];
+  const reportedToken = await readReportedGameToken(env, account.playerId);
+  return { ...account, token: reportedToken || account.token, label: reportedToken ? `${account.label}（自動更新）` : account.label, index: idx, total: accounts.length };
 }
 
 async function pullFromGame(env, token, playerId) {
@@ -328,7 +333,7 @@ export default {
         const row = await env.DB.prepare('SELECT ok, attempted_at, success_at, error, account FROM pull_status WHERE id = 1').first();
         let sessionTokenUpdatedAt = null;
         try {
-          const session = await env.DB.prepare('SELECT updated_at FROM game_session_token WHERE id = 1').first();
+          const session = await env.DB.prepare('SELECT MAX(updated_at) AS updated_at FROM game_session_tokens').first();
           if (session?.updated_at != null) sessionTokenUpdatedAt = Number(session.updated_at);
         } catch (_) { /* 尚未由新版遊戲端回報過 token */ }
         return json({ ok: true, lastPull: row ? { ok: Number(row.ok) === 1, attemptedAt: Number(row.attempted_at), successAt: row.success_at == null ? null : Number(row.success_at), error: row.error || '', account: row.account || null } : null, sessionTokenUpdatedAt }, 200);
@@ -349,8 +354,9 @@ export default {
       try {
         const body = await readJson(request);
         const token = typeof body?.token === 'string' ? body.token.trim() : '';
-        if (token.length < 16 || token.length > MAX_GAME_TOKEN_LENGTH) return json({ ok: false, error: 'invalid token' }, 400);
-        await storeReportedGameToken(env, token);
+        const playerId = typeof body?.playerId === 'string' || typeof body?.playerId === 'number' ? String(body.playerId).trim() : '';
+        if (token.length < 16 || token.length > MAX_GAME_TOKEN_LENGTH || !/^\d{1,80}$/.test(playerId)) return json({ ok: false, error: 'invalid token report' }, 400);
+        await storeReportedGameToken(env, playerId, token);
         return json({ ok: true, updatedAt: Date.now() }, 202);
       } catch (error) { return json({ ok: false, error: error.message || 'invalid request' }, 400); }
     }

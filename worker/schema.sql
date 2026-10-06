@@ -7,9 +7,9 @@ CREATE TABLE IF NOT EXISTS ranking_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_ranking_snapshots_mode_time ON ranking_snapshots(mode, captured_at DESC);
 
--- 最新一次由本機遊戲已登入 WebSocket 回報的短期 token；不提供讀取 API。
-CREATE TABLE IF NOT EXISTS game_session_token (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
+-- 每個帳號各自由本機遊戲已登入 WebSocket 回報的短期 token；不提供讀取 API。
+CREATE TABLE IF NOT EXISTS game_session_tokens (
+  player_id TEXT PRIMARY KEY,
   token TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 );
