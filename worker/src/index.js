@@ -188,7 +188,7 @@ function parseAccounts(env) {
   return token && playerId ? [{ token, playerId, label: playerId }] : [];
 }
 
-// 多帳號時輪流用一個帳號抓取（每次排程只用一個），降低單一帳號被呼叫的頻率、分散風險。
+// 多帳號時輪流抓取；驗證失敗時，同次排程繼續下一個帳號，每個帳號最多一次。
 // 用 D1 記住下一次該輪到第幾個帳號，重新部署或 Worker 重啟都不會跳號或重置。
 async function pickAccount(env) {
   const accounts = parseAccounts(env);
@@ -291,17 +291,33 @@ async function runPullAndRecord(env) {
 }
 
 async function runPull(env) {
-  const account = await pickAccount(env);
+  let account = await pickAccount(env);
   let pulled;
-  try {
-    pulled = await pullFromGame(env, account.token, account.playerId);
-  } catch (error) {
-    error.account = account.label; // 讓失敗記錄也知道是哪個帳號抓的
-    throw error;
+  const skippedAccounts = [];
+  for (let attempt = 0; attempt < account.total; attempt += 1) {
+    try {
+      pulled = await pullFromGame(env, account.token, account.playerId);
+      break;
+    } catch (error) {
+      error.account = account.label;
+      // 只有明確的驗證拒絕才換帳號；網路、官方限流與服務故障不重試，
+      // 避免對同一個服務連續送出沒有幫助的請求。
+      const message = String(error?.message || 'pull failed');
+      const rejected = /^websocket upgrade failed: HTTP (401|403)$/.test(message)
+        || /^request ref=1 rejected:/.test(message);
+      if (!rejected) throw error;
+      skippedAccounts.push({ account: account.label, reason: message });
+      if (attempt + 1 >= account.total) {
+        const exhausted = new Error(`所有 ${account.total} 個帳號驗證失敗，需更新各帳號憑證；最後錯誤：${message}`);
+        exhausted.account = account.label;
+        throw exhausted;
+      }
+      account = await pickAccount(env);
+    }
   }
   const { playerId, rankings, medals } = pulled;
   const capturedAt = Date.now();
-  const summary = { ok: true, capturedAt, account: account.label, accountIndex: account.index, accountTotal: account.total, snapshots: null, medalsUpdated: 0 };
+  const summary = { ok: true, capturedAt, account: account.label, accountIndex: account.index, accountTotal: account.total, skippedAccounts, snapshots: null, medalsUpdated: 0 };
   const modes = rankingsFrom(rankings);
   if (modes) summary.snapshots = await storeSnapshots(env, capturedAt, Object.entries(modes));
   else summary.snapshotsError = 'no 1v1/3v3 ranking data in reply';
