@@ -31,15 +31,18 @@ function formatGap(ms) {
 const STALE_PULL_MS = 3 * 60 * 60 * 1000;
 function pullStatusHtml() {
   const s = state.pull;
-  const tokenNote = state.sessionTokenUpdatedAt
-    ? ` · 遊戲憑證已更新 ${esc(new Date(state.sessionTokenUpdatedAt).toLocaleString())}`
-    : ' · 尚未收到遊戲憑證更新';
-  if (!s) return `<div class="pull-status warn">${tokenNote.trim()}</div>`;
+  if (!s) return '';
   const okAt = s.successAt ? new Date(s.successAt).toLocaleString() : '';
   const accountNote = s.account ? `［${esc(s.account)}］` : '';
-  if (!s.ok) return `<div class="pull-status bad">自動抓取失敗${accountNote}：${esc(s.error || '未知錯誤')}${okAt ? `（上次成功 ${esc(okAt)}）` : ''}${tokenNote}</div>`;
-  if (Date.now() - s.attemptedAt > STALE_PULL_MS) return `<div class="pull-status warn">自動抓取已超過 3 小時沒有執行（上次 ${esc(new Date(s.attemptedAt).toLocaleString())}）${tokenNote}</div>`;
-  return `<div class="pull-status ok">自動抓取正常${accountNote} · 上次成功 ${esc(okAt)}${tokenNote}</div>`;
+  if (!s.ok) return `<div class="pull-status bad">自動抓取失敗${accountNote}：${esc(s.error || '未知錯誤')}${okAt ? `（上次成功 ${esc(okAt)}）` : ''}</div>`;
+  if (Date.now() - s.attemptedAt > STALE_PULL_MS) return `<div class="pull-status warn">自動抓取已超過 3 小時沒有執行（上次 ${esc(new Date(s.attemptedAt).toLocaleString())}）</div>`;
+  return `<div class="pull-status ok">自動抓取正常${accountNote} · 上次成功 ${esc(okAt)}</div>`;
+}
+
+function sessionTokenStatusHtml() {
+  return state.sessionTokenUpdatedAt
+    ? `遊戲憑證已更新 ${esc(new Date(state.sessionTokenUpdatedAt).toLocaleString())}`
+    : '尚未收到遊戲憑證更新';
 }
 
 function render() {
@@ -96,7 +99,7 @@ function render() {
     ${state.error ? `<div class="panel empty">${esc(state.error)}</div>` : ''}
     <section class="cards"><div class="card"><div class="card-label">目前玩家數</div><div class="card-value">${current.length}</div><div class="card-note">${state.mode} 最新快照</div></div><div class="card"><div class="card-label">排名變動</div><div class="card-value">${moved}</div><div class="card-note">${compareNote}</div></div><div class="card"><div class="card-label">上升玩家</div><div class="card-value">${current.filter((p) => deltaFor(p, before).value > 0).length}</div><div class="card-note">名次提高</div></div><div class="card"><div class="card-label">下降玩家</div><div class="card-value">${current.filter((p) => deltaFor(p, before).value < 0).length}</div><div class="card-note">名次降低</div></div></section>
     <section class="panel"><div class="panel-head"><div><h2>${state.mode} 全排行榜</h2><small>${state.snapshots.length} 份快照 · ${compareNote} · 目前顯示 ${filtered.length} 人 · 已有積分 ${scored} 人</small></div><button class="secondary" id="clear">清除本機快取</button></div><div class="table-wrap">${filtered.length ? `<table><thead><tr>${columns.map((c) => `<th>${c.th}</th>`).join('')}</tr></thead><tbody>${filtered.map((p) => `<tr>${columns.map((c) => c.td(p)).join('')}</tr>`).join('')}</tbody></table>` : '<div class="empty">尚無排行榜資料。請確認遊戲端 mod 是否正常運作，並取得一次完整排行榜快照。</div>'}</div></section>
-    <footer class="footer">本網站為獨立排行榜監控頁面；快照只由固定的 Worker API 提供，不會向官方伺服器發送請求。</footer>
+    <footer class="footer"><div>本網站為獨立排行榜監控頁面；快照只由固定的 Worker API 提供，不會向官方伺服器發送請求。</div><div>${sessionTokenStatusHtml()}</div></footer>
   </main>`;
   document.querySelector('#mode').onchange = (e) => { state.mode = e.target.value; load(); loadMedals(); };
   document.querySelector('#sort').onchange = (e) => { state.sort = e.target.value; render(); };
