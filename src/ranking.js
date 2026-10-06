@@ -20,7 +20,18 @@ export function normalizedEntries(snapshot) {
 
 export function latestPair(snapshots) {
   const sorted = [...(Array.isArray(snapshots) ? snapshots : [])].sort((a, b) => Number(b.capturedAt || b.createdAt || 0) - Number(a.capturedAt || a.createdAt || 0));
-  return [sorted[0], sorted[1]];
+  const latest = sorted[0];
+  if (!latest) return [undefined, undefined];
+  const latestAt = Number(latest.capturedAt || latest.createdAt || 0);
+  const latestPayload = JSON.stringify(entriesFrom(latest));
+  // 同一份資料在一分鐘內被重複存入時，不應互相比較。
+  // 超過一分鐘、內容仍相同的正常快照則保留，正確顯示「沒有變動」。
+  const previous = sorted.slice(1).find((snapshot) => {
+    if (latest.id != null && snapshot.id === latest.id) return false;
+    const gap = latestAt - Number(snapshot.capturedAt || snapshot.createdAt || 0);
+    return gap >= 60_000 || JSON.stringify(entriesFrom(snapshot)) !== latestPayload;
+  });
+  return [latest, previous];
 }
 
 // 名次升降：previousRank / currentRank 任一邊沒有（例如上一份快照沒這個人）就視為首次出現。

@@ -67,12 +67,18 @@ async function storeSnapshots(env, capturedAt, requested) {
     if (!MODES.has(mode)) { skipped.push({ mode, reason: 'invalid_mode' }); continue; }
     const entries = Array.isArray(rawEntries) ? rawEntries.slice(0, MAX_ENTRIES).map(cleanEntry).filter(Boolean) : [];
     if (!entries.length) { skipped.push({ mode, reason: 'entries_required' }); continue; }
-    const latest = await env.DB.prepare('SELECT captured_at FROM ranking_snapshots WHERE mode = ?1 ORDER BY captured_at DESC LIMIT 1').bind(mode).first();
-    if (latest && capturedAt - Number(latest.captured_at) < MIN_CAPTURE_INTERVAL_MS) {
+    // 檢查與寫入在同一個 SQL statement 內完成，避免兩個請求同時通過
+    // 時間檢查而插入重複快照。較舊的遲到封包也不應插入。
+    const inserted = await env.DB.prepare(
+      'INSERT INTO ranking_snapshots (mode, captured_at, entry_count, payload) ' +
+      'SELECT ?1, ?2, ?3, ?4 WHERE NOT EXISTS ' +
+      '(SELECT 1 FROM ranking_snapshots WHERE mode = ?1 AND captured_at > ?5)'
+    ).bind(mode, capturedAt, entries.length, JSON.stringify(entries), capturedAt - MIN_CAPTURE_INTERVAL_MS).run();
+    if (Number(inserted.meta?.changes || 0) === 0) {
+      const latest = await env.DB.prepare('SELECT captured_at FROM ranking_snapshots WHERE mode = ?1 ORDER BY captured_at DESC LIMIT 1').bind(mode).first();
       skipped.push({ mode, reason: 'rate_limited', nextAllowedAt: Number(latest.captured_at) + MIN_CAPTURE_INTERVAL_MS });
       continue;
     }
-    await env.DB.prepare('INSERT INTO ranking_snapshots (mode, captured_at, entry_count, payload) VALUES (?1, ?2, ?3, ?4)').bind(mode, capturedAt, entries.length, JSON.stringify(entries)).run();
     await prune(env, mode);
     accepted.push({ mode, entryCount: entries.length });
   }
@@ -452,8 +458,16 @@ export default {
       const mode = String(url.searchParams.get('mode') || '1v1');
       const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit') || 50)));
       if (!MODES.has(mode)) return json({ ok: false, error: 'invalid mode' }, 400);
-      const result = await env.DB.prepare('SELECT id, mode, captured_at AS capturedAt, entry_count AS entryCount, payload FROM ranking_snapshots WHERE mode = ?1 ORDER BY captured_at DESC LIMIT ?2').bind(mode, limit).all();
-      return json({ ok: true, snapshots: (result.results || []).map((row) => ({ id: row.id, mode: row.mode, capturedAt: row.capturedAt, entryCount: row.entryCount, entries: JSON.parse(row.payload) })) }, 200);
+      const result = await env.DB.prepare('SELECT id, mode, captured_at AS capturedAt, entry_count AS entryCount, payload FROM ranking_snapshots WHERE mode = ?1 ORDER BY captured_at DESC, id DESC LIMIT ?2').bind(mode, MAX_SNAPSHOTS_PER_MODE).all();
+      // 舊版曾並行寫入相隔幾毫秒的相同資料；讀取時略過重複副本，
+      // 保留 D1 原始歷史。整點捕捉的相同榜單仍各自保留。
+      const unique = [];
+      for (const row of result.results || []) {
+        const previous = unique[unique.length - 1];
+        if (previous && Number(previous.capturedAt) - Number(row.capturedAt) < MIN_CAPTURE_INTERVAL_MS && previous.payload === row.payload) continue;
+        unique.push(row);
+      }
+      return json({ ok: true, snapshots: unique.slice(0, limit).map((row) => ({ id: row.id, mode: row.mode, capturedAt: row.capturedAt, entryCount: row.entryCount, entries: JSON.parse(row.payload) })) }, 200);
     }
 
     // 陣營清單幾乎是靜態參照資料（全玩家共用），寫入時直接 upsert，不像排行榜快照要留歷史。
