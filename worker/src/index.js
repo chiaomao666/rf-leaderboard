@@ -290,7 +290,58 @@ async function runPullAndRecord(env) {
   }
 }
 
-async function runPull(env) {
+// GAME_LOGIN_ACCOUNTS 只存於 Cloudflare secret，按 playerId 對應帳密。
+// 每輪最多重新登入各帳號一次；不記錄帳密、token 或官方原始回應。
+async function refreshAllGameTokens(env) {
+  if (!env.GAME_LOGIN_ACCOUNTS) throw new Error('所有帳號驗證失敗；尚未設定 GAME_LOGIN_ACCOUNTS，無法自動重新登入');
+  let credentials;
+  try { credentials = JSON.parse(env.GAME_LOGIN_ACCOUNTS); }
+  catch (_) { throw new Error('GAME_LOGIN_ACCOUNTS 格式錯誤'); }
+  if (!Array.isArray(credentials)) throw new Error('GAME_LOGIN_ACCOUNTS 必須為陣列');
+  let refreshed = 0;
+  const failed = [];
+  for (const account of parseAccounts(env)) {
+    const login = credentials.find((entry) => String(entry?.playerId || '') === account.playerId);
+    if (!login || typeof login.email !== 'string' || !login.email.trim() || typeof login.password !== 'string' || !login.password) {
+      failed.push({ account: account.label, reason: '未設定登入帳密' });
+      continue;
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12_000);
+    try {
+      const response = await fetch('https://api.komisureiya.com/api/users/log_in', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8', Accept: 'application/json' },
+        body: new URLSearchParams({
+          'user[email]': login.email.trim(), 'user[password]': login.password,
+          locale: 'zh_TW', app_version: env.GAME_APP_VERSION || '2.28', key: 't9cTpsbSCYcJgsrrC',
+        }).toString(),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        failed.push({ account: account.label, reason: `登入 HTTP ${response.status}` });
+        // 限流或官方故障時停止後續登入，交由下一次整點排程再試。
+        if (response.status === 429 || response.status >= 500) break;
+        continue;
+      }
+      const body = await response.json();
+      const token = body?.data?.user_token;
+      if (body?.status !== 'ok' || String(body?.data?.user_id) !== account.playerId
+        || typeof token !== 'string' || token.length < 16 || token.length > MAX_GAME_TOKEN_LENGTH) {
+        failed.push({ account: account.label, reason: '登入未成功或玩家 ID 不符' });
+        continue;
+      }
+      await storeReportedGameToken(env, account.playerId, token);
+      refreshed += 1;
+    } catch (_) {
+      failed.push({ account: account.label, reason: '登入連線、回應或憑證儲存失敗' });
+    } finally { clearTimeout(timeout); }
+  }
+  if (!refreshed) throw new Error(`所有帳號自動更新憑證失敗：${failed.map((entry) => `${entry.account}：${entry.reason}`).join('；')}`);
+  return { refreshed, failed };
+}
+
+async function runPull(env, allowRefresh = true) {
   let account = await pickAccount(env);
   let pulled;
   const skippedAccounts = [];
@@ -308,6 +359,12 @@ async function runPull(env) {
       if (!rejected) throw error;
       skippedAccounts.push({ account: account.label, reason: message });
       if (attempt + 1 >= account.total) {
+        if (allowRefresh) {
+          const refresh = await refreshAllGameTokens(env);
+          // 一次排程只允許一輪自動登入，避免更新失敗時無限循環。
+          const retry = await runPull(env, false);
+          return { ...retry, skippedAccounts: [...skippedAccounts, ...retry.skippedAccounts], credentialsRefresh: refresh };
+        }
         const exhausted = new Error(`所有 ${account.total} 個帳號驗證失敗，需更新各帳號憑證；最後錯誤：${message}`);
         exhausted.account = account.label;
         throw exhausted;
