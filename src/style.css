@@ -16,6 +16,7 @@ h1 { margin: 6px 0 4px; font-size: clamp(26px, 4vw, 42px); line-height: 1.12; }
 .pull-status.ok { color: #6ee7b7; }
 .pull-status.warn { color: #fcd34d; }
 .pull-status.bad { color: #fb7185; }
+.ranking-pull-status { margin: 12px 0; text-align: center; }
 .delta-sep { color: #5b6b82; }
 .status-dot { width: 9px; height: 9px; border-radius: 50%; background: #64748b; box-shadow: 0 0 0 4px #64748b22; }
 .status-dot.live { background: #34d399; box-shadow: 0 0 0 4px #34d39922; }
