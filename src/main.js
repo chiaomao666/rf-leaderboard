@@ -8,6 +8,32 @@ const DEFAULT_API_ORIGIN = 'https://rf-ranking-monitor-api.chengyen1209.workers.
 const state = { mode: '1v1', query: '', nation: '', sort: 'rank', snapshots: [], nations: [], medals: new Map(), pull: null, sessionTokenUpdatedAt: null, loading: false, error: '' };
 const app = document.querySelector('#app');
 
+// 側邊欄獨立於排行榜，背景更新資料時不會關閉選單或移走焦點。
+const sidebar = document.createElement('dialog');
+sidebar.id = 'navigation-sidebar';
+sidebar.className = 'navigation-sidebar';
+sidebar.setAttribute('aria-labelledby', 'sidebar-title');
+sidebar.innerHTML = `<div class="sidebar-head"><h2 id="sidebar-title">選單</h2><button class="icon-button" id="close-sidebar" aria-label="關閉選單">×</button></div>
+  <nav aria-label="功能選單"><button class="sidebar-link" id="open-settings" aria-controls="sidebar-settings" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M9 3h6l1 3 3 1 2 5-2 5-3 1-1 3H9l-1-3-3-1-2-5 2-5 3-1Z"/><circle cx="12" cy="12" r="3"/></svg><span>設定</span><span class="sidebar-chevron" aria-hidden="true">›</span></button></nav>
+  <section id="sidebar-settings" class="sidebar-settings" hidden><h3>設定</h3><p>目前尚無可調整的設定，之後會在這裡加入更多選項。</p></section>`;
+app.after(sidebar);
+document.querySelector('#close-sidebar').onclick = () => sidebar.close();
+document.querySelector('#open-settings').onclick = (event) => {
+  const settings = document.querySelector('#sidebar-settings');
+  settings.hidden = !settings.hidden;
+  event.currentTarget.setAttribute('aria-expanded', String(!settings.hidden));
+};
+sidebar.addEventListener('click', (event) => {
+  const bounds = sidebar.getBoundingClientRect();
+  if (event.target === sidebar && (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom)) sidebar.close();
+});
+sidebar.addEventListener('close', () => {
+  document.body.classList.remove('sidebar-open');
+  const menuButton = document.querySelector('#open-sidebar');
+  menuButton.setAttribute('aria-expanded', 'false');
+  menuButton.focus({ preventScroll: true });
+});
+
 function apiOrigin() {
   // 保留 window.RF_RANKING_API_ORIGIN 這個開發用 override（例如本機測試指向 dev worker），
   // 一般使用者不會碰到，畫面上完全不會有輸入框。
@@ -94,6 +120,7 @@ function render() {
     { th: '玩家 ID', td: (p) => `<td>${esc(p.id || '—')}</td>` },
   ].filter(Boolean);
   app.innerHTML = `<main class="shell">
+    <div class="navigation-bar"><button class="icon-button" id="open-sidebar" aria-label="開啟選單" aria-controls="navigation-sidebar" aria-expanded="${sidebar.open}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button></div>
     <header class="topbar"><div><div class="eyebrow">RF RANKING MONITOR</div><h1>排行榜排名變化監控</h1><p class="subtitle">保存整份排行榜快照，追蹤所有玩家的名次升降。</p></div><div class="status-wrap"><div class="status"><i class="status-dot ${latest ? 'live' : ''}"></i>${state.loading ? '正在同步…' : state.error ? '同步失敗' : latest ? `最後快照 ${esc(captured)}` : '等待資料'}</div>${pullStatusHtml()}</div></header>
     <section class="toolbar"><label class="control"><span>排行榜模式</span><select id="mode">${MODES.map((m) => `<option ${m === state.mode ? 'selected' : ''}>${m}</option>`).join('')}</select></label><label class="control"><span>陣營篩選</span><select id="nation"><option value="">全部陣營</option>${[...nationMap.entries()].filter(([id]) => !HIDDEN_FILTER_NATION_IDS.has(id)).sort((a, b) => a[0] - b[0]).map(([id, n]) => `<option value="${id}" ${String(id) === state.nation ? 'selected' : ''}>${esc(n.name)}</option>`).join('')}</select></label><label class="control"><span>排序方式</span><select id="sort"><option value="rank" ${state.sort === 'rank' ? 'selected' : ''}>依名次</option><option value="score" ${state.sort === 'score' ? 'selected' : ''}>依積分</option></select></label><label class="control"><span>搜尋玩家／聯盟／陣營／ID</span><input id="query" value="${esc(state.query)}" placeholder="輸入關鍵字" /></label><button id="refresh">重新同步</button></section>
     ${state.error ? `<div class="panel empty">${esc(state.error)}</div>` : ''}
@@ -102,6 +129,11 @@ function render() {
     ${state.pull ? `<div class="ranking-pull-status">${pullStatusHtml()}</div>` : ''}
     <footer class="footer"><div>本網站為獨立排行榜監控頁面；快照只由固定的 Worker API 提供，不會向官方伺服器發送請求。</div><div>${sessionTokenStatusHtml()}</div></footer>
   </main>`;
+  document.querySelector('#open-sidebar').onclick = (event) => {
+    sidebar.showModal();
+    document.body.classList.add('sidebar-open');
+    event.currentTarget.setAttribute('aria-expanded', 'true');
+  };
   document.querySelector('#mode').onchange = (e) => { state.mode = e.target.value; load(); loadMedals(); };
   document.querySelector('#sort').onchange = (e) => { state.sort = e.target.value; render(); };
   document.querySelector('#nation').onchange = (e) => { state.nation = e.target.value; render(); };
