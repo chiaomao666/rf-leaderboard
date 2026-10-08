@@ -37,6 +37,8 @@ h1 { margin: 6px 0 4px; font-size: clamp(26px, 4vw, 42px); line-height: 1.12; }
 .status-dot.live { background: #34d399; box-shadow: 0 0 0 4px #34d39922; }
 .toolbar, .panel { border: 1px solid #263246; background: #111925dd; border-radius: 16px; box-shadow: 0 18px 45px #0000001f; }
 .toolbar { display: flex; flex-wrap: wrap; gap: 12px; padding: 14px; margin-bottom: 16px; }
+.change-filter { display: flex; align-items: center; gap: 8px; margin-left: auto; align-self: end; min-height: 44px; color: #c8d5e5; font-size: 13px; cursor: pointer; }
+.change-filter input { width: 18px; height: 18px; margin: 0; accent-color: #67e8f9; cursor: pointer; }
 .control { display: grid; gap: 5px; min-width: 150px; }
 .control span { color: #8494aa; font-size: 12px; }
 input, select { color: #e8edf5; background: #0b111c; border: 1px solid #2c3a50; border-radius: 9px; padding: 9px 10px; outline: none; }
@@ -74,6 +76,7 @@ td { color: #d7e0ec; font-size: 13px; }
   .toolbar { display: grid; grid-template-columns: 1fr 1fr; }
   .control { min-width: 0; }
   .toolbar button { width: 100%; }
+  .change-filter { grid-column: 1 / -1; margin-left: 0; justify-self: end; }
   .cards { grid-template-columns: 1fr 1fr; gap: 8px; }
   .card { padding: 12px; }
   .card-value { font-size: 22px; }
