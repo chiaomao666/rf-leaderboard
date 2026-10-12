@@ -5,7 +5,7 @@ import { MODES, normalizedEntries, latestPair, deltaFor, rankDelta, nationRanks,
 // 若之後要換 Worker 網域，改這個常數即可。
 const DEFAULT_API_ORIGIN = 'https://rf-ranking-monitor-api.chengyen1209.workers.dev';
 
-const state = { mode: '1v1', query: '', nation: '', sort: 'rank', onlyChanged: false, snapshots: [], nations: [], medals: new Map(), pull: null, sessionTokenUpdatedAt: null, loading: false, error: '' };
+const state = { mode: '1v1', query: '', nation: '', sort: 'rank', onlyChanged: false, snapshots: [], nations: [], pull: null, sessionTokenUpdatedAt: null, loading: false, error: '' };
 const app = document.querySelector('#app');
 
 // 側邊欄獨立於排行榜，背景更新資料時不會關閉選單或移走焦點。
@@ -88,7 +88,7 @@ function render() {
     return `${p.id} ${p.name} ${p.organization} ${nationName}`.toLowerCase().includes(query);
   });
   if (state.sort === 'score') {
-    const scoreOf = (p) => state.medals.get(p.id)?.score;
+    const scoreOf = (p) => p.score;
     filtered.sort((a, b) => {
       const sa = scoreOf(a), sb = scoreOf(b);
       if (sa == null && sb == null) return a.rank - b.rank;
@@ -97,7 +97,7 @@ function render() {
       return sb - sa || a.rank - b.rank;
     });
   }
-  const scored = current.filter((p) => state.medals.has(p.id)).length;
+  const scored = current.filter((p) => p.score != null).length;
   const moved = current.filter((p) => deltaFor(p, before).value !== null && deltaFor(p, before).value !== 0).length;
   const latestAt = latest ? Number(latest.capturedAt || latest.createdAt) : 0;
   const previousAt = previous ? Number(previous.capturedAt || previous.createdAt) : 0;
@@ -117,7 +117,7 @@ function render() {
     byNation
       ? { th: '陣營／全服排名變化', td: (p) => `<td>${shortDelta(rankDelta(nationBefore.get(p.id), nationNow.get(p.id)))}<span class="delta-sep"> / </span>${shortDelta(deltaFor(p, before))}</td>` }
       : { th: '變化', td: (p) => { const d = deltaFor(p, before); return `<td class="${d.cls}">${d.label}</td>`; } },
-    { th: '積分', td: (p) => { const medal = state.medals.get(p.id); return `<td class="score">${medal ? Number(medal.score).toLocaleString() : '—'}</td>`; } },
+    { th: '積分', td: (p) => `<td class="score">${p.score != null ? p.score.toLocaleString() : '—'}</td>` },
     { th: '玩家', td: (p) => `<td>${esc(p.name)}</td>` },
     { th: '聯盟／組織', td: (p) => `<td>${esc(p.organization)}</td>` },
     { th: '陣營', td: (p) => `<td>${esc(nationFor(p, nationMap)?.name || '—')}</td>` },
@@ -146,7 +146,7 @@ function render() {
     document.body.classList.add('sidebar-open');
     event.currentTarget.setAttribute('aria-expanded', 'true');
   };
-  document.querySelector('#mode').onchange = (e) => { state.mode = e.target.value; load(); loadMedals(); };
+  document.querySelector('#mode').onchange = (e) => { state.mode = e.target.value; load(); };
   document.querySelector('#sort').onchange = (e) => { state.sort = e.target.value; render(); };
   document.querySelector('#only-changed').onchange = (e) => {
     state.onlyChanged = e.target.checked;
@@ -173,7 +173,7 @@ function render() {
     const next = document.querySelector('#query');
     if (next) { next.focus(); next.setSelectionRange(cursor, cursor); }
   };
-  document.querySelector('#refresh').onclick = () => { load(); loadNations(); loadMedals(); loadStatus(); };
+  document.querySelector('#refresh').onclick = () => { load(); loadNations(); loadStatus(); };
   document.querySelector('#clear').onclick = () => { state.snapshots = []; render(); };
 }
 async function load(silent = false) {
@@ -210,29 +210,9 @@ async function loadStatus() {
     }
   } catch (error) { console.warn('無法載入抓取狀態：', error); }
 }
-async function loadMedals() {
-  // 積分只有遊戲端 mod 攔截到的玩家才有，跟排行榜快照分開取；失敗不影響排行榜顯示。
-  const mode = state.mode;
-  const map = new Map();
-  try {
-    const pageSize = 900;
-    for (let offset = 0; offset < 5400; offset += pageSize) {
-      const response = await fetch(`${apiOrigin()}/api/medals?mode=${encodeURIComponent(mode)}&limit=${pageSize}&offset=${offset}`, { cache: 'no-store' });
-      const body = await response.json();
-      if (!response.ok || body.ok !== true) throw new Error(body.error || `HTTP ${response.status}`);
-      const entries = Array.isArray(body.entries) ? body.entries : [];
-      for (const e of entries) map.set(String(e.playerId), e);
-      if (offset + pageSize >= Number(body.total || 0) || !entries.length) break;
-    }
-    if (mode !== state.mode) return; // 載入途中使用者已切換模式，丟棄過期結果
-    state.medals = map;
-    render();
-  } catch (error) { console.warn('無法載入積分：', error); }
-}
 render();
 load();
 loadNations();
-loadMedals();
 loadStatus();
 
 // 網站自動更新：每 5 分鐘在背景重新抓一次（快照本身是遊戲端每小時上傳，這裡只是讓畫面跟上）。
@@ -242,6 +222,5 @@ setInterval(() => {
   if (document.hidden || state.loading) return;
   if (document.activeElement && document.activeElement.id === 'query') return;
   load(true);
-  loadMedals();
   loadStatus();
 }, AUTO_REFRESH_MS);

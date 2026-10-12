@@ -67,6 +67,17 @@ async function storeSnapshots(env, capturedAt, requested) {
     if (!MODES.has(mode)) { skipped.push({ mode, reason: 'invalid_mode' }); continue; }
     const entries = Array.isArray(rawEntries) ? rawEntries.slice(0, MAX_ENTRIES).map(cleanEntry).filter(Boolean) : [];
     if (!entries.length) { skipped.push({ mode, reason: 'entries_required' }); continue; }
+    // 積分在建立榜單時凍結；單獨收到 medals 不得修改已保存的快照。
+    // 不合併晚於本次榜單的積分，避免遲到的榜單混入未來資料。
+    const medals = await env.DB.prepare('SELECT player_id, score, captured_at FROM player_medals WHERE mode = ?1 AND captured_at <= ?2').bind(mode, capturedAt).all();
+    const scores = new Map((medals.results || []).map((row) => [String(row.player_id), row]));
+    for (const entry of entries) {
+      const medal = scores.get(entry.id);
+      if (entry.score == null && medal) {
+        entry.score = Number(medal.score);
+        entry.scoreCapturedAt = Number(medal.captured_at);
+      }
+    }
     // 檢查與寫入在同一個 SQL statement 內完成，避免兩個請求同時通過
     // 時間檢查而插入重複快照。較舊的遲到封包也不應插入。
     const inserted = await env.DB.prepare(
@@ -382,11 +393,12 @@ async function runPull(env, allowRefresh = true) {
   const capturedAt = Date.now();
   const summary = { ok: true, capturedAt, account: account.label, accountIndex: account.index, accountTotal: account.total, skippedAccounts, snapshots: null, medalsUpdated: 0 };
   const modes = rankingsFrom(rankings);
-  if (modes) summary.snapshots = await storeSnapshots(env, capturedAt, Object.entries(modes));
-  else summary.snapshotsError = 'no 1v1/3v3 ranking data in reply';
   const scores = medalsFrom(medals);
   if (scores) summary.medalsUpdated = await storeMedals(env, playerId, scores, capturedAt);
   else summary.medalsError = 'no 1v1/3v3 medals data in reply';
+  // 同一輪取得的積分先保存，再建立包含該積分的排行榜快照。
+  if (modes) summary.snapshots = await storeSnapshots(env, capturedAt, Object.entries(modes));
+  else summary.snapshotsError = 'no 1v1/3v3 ranking data in reply';
   return summary;
 }
 

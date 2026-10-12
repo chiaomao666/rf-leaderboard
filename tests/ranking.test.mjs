@@ -4,7 +4,14 @@ import { normalizedEntries, latestPair, deltaFor } from '../src/ranking.js';
 
 test('normalizes a full ranking snapshot and preserves organization names', () => {
   const entries = normalizedEntries({ entries: [{ id: 832459, name: '俏貓', organization: { name: '紅蝶' }, rank: 4, score: 1200 }] });
-  assert.deepEqual(entries[0], { id: '832459', name: '俏貓', organization: '紅蝶', rank: 4, score: 1200 });
+  assert.deepEqual(entries[0], { id: '832459', name: '俏貓', organization: '紅蝶', rank: 4, nationId: null, score: 1200 });
+});
+
+test('snapshot scores preserve zero and do not invent missing scores', () => {
+  const entries = normalizedEntries({ entries: [
+    { id: 1, score: 0 }, { id: 2, score: null }, { id: 3 }, { id: 4, score: 'invalid' }, { id: 5, score: '42825' },
+  ] });
+  assert.deepEqual(entries.map((p) => p.score), [0, null, null, null, 42825]);
 });
 
 test('calculates rank movement for every player between snapshots', () => {

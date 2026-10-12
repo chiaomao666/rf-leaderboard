@@ -14,7 +14,8 @@ export function normalizedEntries(snapshot) {
       : p.organization ?? p.union ?? p.guild ?? '未提供聯盟',
     rank: Number(p.rank ?? index + 1),
     nationId: Number.isFinite(Number(p.nationId ?? p.nation_id)) ? Number(p.nationId ?? p.nation_id) : null,
-    // 排行榜快照本身只有名次；積分另外從 /api/medals 取得，在 main.js 用玩家 ID 合併。
+    // 積分與名次來自同一份快照；缺少積分時不可將 null 當成 0。
+    score: p.score != null && Number.isFinite(Number(p.score)) ? Number(p.score) : null,
   })).filter((p) => p.id || p.name);
 }
 
